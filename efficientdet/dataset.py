@@ -1,10 +1,12 @@
 import os
 import torch
 import numpy as np
+import pickle
 
 from torch.utils.data import Dataset, DataLoader
 from pycocotools.coco import COCO
 import cv2
+import tensorflow.compat.v1 as tf
 
 
 class CocoDataset(Dataset):
@@ -81,7 +83,91 @@ class CocoDataset(Dataset):
         annotations[:, 3] = annotations[:, 1] + annotations[:, 3]
 
         return annotations
+class WaymoDataset(Dataset):
+    """Dataset for image segmentation and regression."""
 
+    def __init__(
+        self,
+        scope="training",
+        root_dir="/home/project_x/data/",
+        cameras=CAMERAS,
+        exclusions=None,
+        transform=None
+    ):
+
+        self.transform = transform
+
+        # Create list of all filepaths
+        self.filepaths = []
+        root_path = root_dir + scope
+        for cam in cameras:
+            cam_filepaths = os.listdir(f"{root_path}/{cam}")
+            self.filepaths += [f"{root_path}/{cam}/{i}" for i in cam_filepaths]
+
+        # Filter exclusions
+        if exclusions is not None:
+            self.filepaths = [
+                i for i in self.filepaths if not any(j in i for j in exclusions)
+            ]
+
+    def __len__(self):
+        return len(self.filepaths)
+
+    def __getitem__(self, item):
+
+        fpath = self.filepaths[item]
+        raw_sample = load_pickle(fpath)
+        img = self.load_image(raw_sample['image'])
+        annot = self.load_annotations(raw_sample["labels"].labels)
+        sample = {'img': img, 'annot': annot}
+        if self.transform:
+            sample = self.transform(sample)
+        sample = {'raw':raw_sample, 'id':fpath.split('/')[-1], **sample}
+        return sample
+
+    def get_cam_type(self, item):
+        return self.filepaths[item].split('/')[5]
+
+    def load_image(self, byte_img):
+        img = tf.image.decode_jpeg(byte_img).numpy()
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # if len(img.shape) == 2:
+        #     img = skimage.color.gray2rgb(img)
+
+        return img.astype(np.float32) / 255.
+    def load_annotations(self, annot):
+        # get ground truth annotations
+        annotations = np.zeros((0, 5))
+
+        # some images appear to miss annotations
+        if len(annot) == 0:
+            return annotations
+
+        # parse annotations
+        for idx, a in enumerate(annot):
+
+            if a.type==3:
+                continue
+            # some annotations have basically no width / height, skip them
+            if a.box.width < 1 or a.box.length < 1:
+                continue
+
+            annotation = np.zeros((1, 5))
+            annotation[0, :4] = [
+            a.box.center_x -0.5*a.box.length,
+            a.box.center_y -0.5*a.box.width,
+            a.box.center_x +0.5*a.box.length,
+            a.box.center_y +0.5*a.box.width,
+            ]
+            annotation[0, 4] = 2 if a.type==4 else a.type-1
+            annotations = np.append(annotations, annotation, axis=0)
+
+
+        return annotations
+
+    def num_classes(self):
+        return 3
 
 def collater(data):
     imgs = [s['img'] for s in data]
@@ -96,9 +182,10 @@ def collater(data):
 
         annot_padded = torch.ones((len(annots), max_num_annots, 5)) * -1
 
-        for idx, annot in enumerate(annots):
-            if annot.shape[0] > 0:
-                annot_padded[idx, :annot.shape[0], :] = annot
+        if max_num_annots > 0:
+            for idx, annot in enumerate(annots):
+                if annot.shape[0] > 0:
+                    annot_padded[idx, :annot.shape[0], :] = annot
     else:
         annot_padded = torch.ones((len(annots), 1, 5)) * -1
 
@@ -109,30 +196,27 @@ def collater(data):
 
 class Resizer(object):
     """Convert ndarrays in sample to Tensors."""
-    
-    def __init__(self, img_size=512):
-        self.img_size = img_size
 
-    def __call__(self, sample):
+    def __call__(self, sample, common_size=512):
         image, annots = sample['img'], sample['annot']
         height, width, _ = image.shape
         if height > width:
-            scale = self.img_size / height
-            resized_height = self.img_size
+            scale = common_size / height
+            resized_height = common_size
             resized_width = int(width * scale)
         else:
-            scale = self.img_size / width
+            scale = common_size / width
             resized_height = int(height * scale)
-            resized_width = self.img_size
+            resized_width = common_size
 
-        image = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR)
+        image = cv2.resize(image, (resized_width, resized_height))
 
-        new_image = np.zeros((self.img_size, self.img_size, 3))
+        new_image = np.zeros((common_size, common_size, 3))
         new_image[0:resized_height, 0:resized_width] = image
 
         annots[:, :4] *= scale
 
-        return {'img': torch.from_numpy(new_image).to(torch.float32), 'annot': torch.from_numpy(annots), 'scale': scale}
+        return {'img': torch.from_numpy(new_image), 'annot': torch.from_numpy(annots), 'scale': scale}
 
 
 class Augmenter(object):
@@ -160,11 +244,16 @@ class Augmenter(object):
 
 class Normalizer(object):
 
-    def __init__(self, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
-        self.mean = np.array([[mean]])
-        self.std = np.array([[std]])
+    def __init__(self):
+        self.mean = np.array([[[0.485, 0.456, 0.406]]])
+        self.std = np.array([[[0.229, 0.224, 0.225]]])
 
     def __call__(self, sample):
+        # print(sample)
         image, annots = sample['img'], sample['annot']
 
         return {'img': ((image.astype(np.float32) - self.mean) / self.std), 'annot': annots}
+
+def load_pickle(fpath):
+    with open(fpath, "rb") as f:
+        return pickle.load(f)

@@ -12,9 +12,9 @@ import yaml
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from efficientdet.dataset import CocoDataset, Resizer, Normalizer, Augmenter, collater
+from efficientdet.dataset import WaymoDataset, Resizer, Normalizer, Augmenter, collater
 from backbone import EfficientDetBackbone
-from tensorboardX import SummaryWriter
+# from tensorboardX import SummaryWriter
 import numpy as np
 from tqdm.autonotebook import tqdm
 
@@ -58,6 +58,7 @@ def get_args():
     parser.add_argument('--saved_path', type=str, default='logs/')
     parser.add_argument('--debug', type=boolean_string, default=False, help='whether visualize the predicted boxes of trainging, '
                                                                   'the output images will be in test/')
+    parser.add_argument("-f", type=str, default="bam")
 
     args = parser.parse_args()
     return args
@@ -115,16 +116,15 @@ def train(opt):
                   'num_workers': opt.num_workers}
 
     input_sizes = [512, 640, 768, 896, 1024, 1280, 1280, 1536]
-    training_set = CocoDataset(root_dir=os.path.join(opt.data_path, params.project_name), set=params.train_set,
-                               transform=transforms.Compose([Normalizer(mean=params.mean, std=params.std),
-                                                             Augmenter(),
-                                                             Resizer(input_sizes[opt.compound_coef])]))
+    training_set = WaymoDataset(
+        cameras=opt.cam_view,scope='training',
+        transform=transforms.Compose([Normalizer(), Resizer()]))
     training_generator = DataLoader(training_set, **training_params)
 
-    val_set = CocoDataset(root_dir=os.path.join(opt.data_path, params.project_name), set=params.val_set,
-                          transform=transforms.Compose([Normalizer(mean=params.mean, std=params.std),
-                                                        Resizer(input_sizes[opt.compound_coef])]))
-    val_generator = DataLoader(val_set, **val_params)
+    val_set = WaymoDataset(
+        cameras=opt.cam_view, scope='validation',
+        transform=transforms.Compose([Normalizer(), Resizer()]))
+    val_generator = DataLoader(test_set, **test_params)
 
     model = EfficientDetBackbone(num_classes=len(params.obj_list), compound_coef=opt.compound_coef,
                                  ratios=eval(params.anchors_ratios), scales=eval(params.anchors_scales))
@@ -178,7 +178,7 @@ def train(opt):
     else:
         use_sync_bn = False
 
-    writer = SummaryWriter(opt.log_path + f'/{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}/')
+    # writer = SummaryWriter(opt.log_path + f'/{datetime.datetime.now().strftime("%Y%m%d-%H%M%S")}/')
 
     # warp the model with loss function, to reduce the memory usage on gpu0 and speedup
     model = ModelWithLoss(model, debug=opt.debug)
@@ -246,13 +246,13 @@ def train(opt):
                         'Step: {}. Epoch: {}/{}. Iteration: {}/{}. Cls loss: {:.5f}. Reg loss: {:.5f}. Total loss: {:.5f}'.format(
                             step, epoch, opt.num_epochs, iter + 1, num_iter_per_epoch, cls_loss.item(),
                             reg_loss.item(), loss.item()))
-                    writer.add_scalars('Loss', {'train': loss}, step)
-                    writer.add_scalars('Regression_loss', {'train': reg_loss}, step)
-                    writer.add_scalars('Classfication_loss', {'train': cls_loss}, step)
+                    # writer.add_scalars('Loss', {'train': loss}, step)
+                    # writer.add_scalars('Regression_loss', {'train': reg_loss}, step)
+                    # writer.add_scalars('Classfication_loss', {'train': cls_loss}, step)
 
                     # log learning_rate
                     current_lr = optimizer.param_groups[0]['lr']
-                    writer.add_scalar('learning_rate', current_lr, step)
+                    # writer.add_scalar('learning_rate', current_lr, step)
 
                     step += 1
 
@@ -297,9 +297,9 @@ def train(opt):
                 print(
                     'Val. Epoch: {}/{}. Classification loss: {:1.5f}. Regression loss: {:1.5f}. Total loss: {:1.5f}'.format(
                         epoch, opt.num_epochs, cls_loss, reg_loss, loss))
-                writer.add_scalars('Loss', {'val': loss}, step)
-                writer.add_scalars('Regression_loss', {'val': reg_loss}, step)
-                writer.add_scalars('Classfication_loss', {'val': cls_loss}, step)
+                # writer.add_scalars('Loss', {'val': loss}, step)
+                # writer.add_scalars('Regression_loss', {'val': reg_loss}, step)
+                # writer.add_scalars('Classfication_loss', {'val': cls_loss}, step)
 
                 if loss + opt.es_min_delta < best_loss:
                     best_loss = loss
@@ -315,8 +315,8 @@ def train(opt):
                     break
     except KeyboardInterrupt:
         save_checkpoint(model, f'efficientdet-d{opt.compound_coef}_{epoch}_{step}.pth')
-        writer.close()
-    writer.close()
+    #     writer.close()
+    # writer.close()
 
 
 def save_checkpoint(model, name):
